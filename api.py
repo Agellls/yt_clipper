@@ -1,13 +1,13 @@
 """
-Enhanced YouTube Video Clipper API
-A Flask-based YouTube video downloader with advanced clipping and quality options
+Enhanced YouTube Video Clipper API (with resize / fit options)
+A Flask-based YouTube video downloader with advanced clipping, quality options and resizing.
 """
 
 import os
 import tempfile
 import logging
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, List
 from urllib.parse import urlparse
 from dataclasses import dataclass
@@ -50,7 +50,7 @@ class VideoQuality(Enum):
     """Video quality options"""
     BEST = "best"
     UHD_4K = "2160p"
-    QHD_2K = "1440p" 
+    QHD_2K = "1440p"
     FHD = "1080p"
     HD = "720p"
     SD = "480p"
@@ -83,6 +83,11 @@ class DownloadOptions:
     metadata: bool = True
     custom_format: Optional[str] = None
 
+    # New fields for resizing
+    output_width: Optional[int] = None
+    output_height: Optional[int] = None
+    fit_mode: Optional[str] = None  # 'crop', 'pad', 'fit', 'stretch'
+
 
 class VideoDownloadError(Exception):
     """Custom exception for video download errors"""
@@ -101,18 +106,18 @@ def validate_rapidapi_headers() -> Tuple[bool, Optional[Dict], int]:
     # Keep the lenient validation from working version
     rapidapi_key = request.headers.get('X-RapidAPI-Key')
     rapidapi_host = request.headers.get('X-RapidAPI-Host')
-    
+
     # More lenient check - accept if either header exists
     if rapidapi_key or rapidapi_host:
         return True, None, 200
-    
+
     # For testing: check if it looks like it came from RapidAPI
     user_agent = request.headers.get('User-Agent', '')
     if 'rapidapi' in user_agent.lower():
         return True, None, 200
-    
+
     return False, {
-        "error": "Authentication failed", 
+        "error": "Authentication failed",
         "message": "Authentication required"
     }, 401
 
@@ -121,7 +126,7 @@ def validate_youtube_url(url: str) -> bool:
     """Validate if URL is a supported YouTube URL"""
     if not url:
         return False
-    
+
     try:
         parsed = urlparse(url)
         valid_domains = [
@@ -141,31 +146,31 @@ def validate_clip_times(start: Optional[int], end: Optional[int], duration: int)
             f"Video duration ({format_duration(duration)}) exceeds maximum "
             f"allowed ({format_duration(MAX_VIDEO_DURATION)})"
         )
-    
+
     if start is None or end is None:
         return
-    
+
     # Validate time parameters
     if not isinstance(start, int) or not isinstance(end, int):
         raise ValidationError("Start and end times must be integers")
-    
+
     if start < 0 or end < 0:
         raise ValidationError("Times must be non-negative")
-    
+
     if start >= end:
         raise ValidationError("Start time must be less than end time")
-    
+
     if end > duration:
         raise ValidationError(
             f"End time ({format_duration(end)}) exceeds video duration "
             f"({format_duration(duration)})"
         )
-    
+
     # Validate clip duration
     clip_duration = end - start
     if clip_duration < MIN_CLIP_DURATION:
         raise ValidationError(f"Clip must be at least {MIN_CLIP_DURATION} second(s)")
-    
+
     if clip_duration > MAX_CLIP_DURATION:
         raise ValidationError(
             f"Clip duration ({format_duration(clip_duration)}) exceeds "
@@ -179,7 +184,7 @@ def force_cleanup_all_files() -> None:
         if not os.path.exists(DOWNLOAD_FOLDER):
             os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
             return
-            
+
         cleaned_count = 0
         for filename in os.listdir(DOWNLOAD_FOLDER):
             file_path = os.path.join(DOWNLOAD_FOLDER, filename)
@@ -190,7 +195,7 @@ def force_cleanup_all_files() -> None:
                     logger.info(f"Cleaned up file: {filename}")
                 except Exception as file_error:
                     logger.error(f"Error removing file {filename}: {file_error}")
-        
+
         logger.info(f"Cleanup completed: {cleaned_count} files removed")
     except Exception as e:
         logger.error(f"Error during cleanup: {e}")
@@ -202,10 +207,10 @@ def sanitize_filename(filename: str) -> str:
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         filename = filename.replace(char, '_')
-    
+
     # Clean up whitespace and special characters
     filename = filename.replace('  ', ' ').replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-    
+
     return filename.strip()[:100]  # Limit length
 
 
@@ -213,11 +218,11 @@ def format_duration(seconds: int) -> str:
     """Format seconds to HH:MM:SS"""
     if seconds <= 0:
         return "00:00:00"
-    
+
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     seconds = seconds % 60
-    
+
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
@@ -232,14 +237,14 @@ def extract_video_info(url: str) -> Dict[str, Any]:
             'cookiefile': None,  # Don't use cookies by default
             'no_check_certificate': False,
         }
-        
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
+
             # Extract available video qualities
             formats = info.get('formats', [])
             available_qualities = set()
-            
+
             for fmt in formats:
                 height = fmt.get('height')
                 if height:
@@ -249,7 +254,7 @@ def extract_video_info(url: str) -> Dict[str, Any]:
                     elif height >= 720: available_qualities.add('720p')
                     elif height >= 480: available_qualities.add('480p')
                     elif height >= 360: available_qualities.add('360p')
-            
+
             return {
                 'title': info.get('title', 'Unknown'),
                 'duration': info.get('duration', 0),
@@ -260,7 +265,7 @@ def extract_video_info(url: str) -> Dict[str, Any]:
                 'description': info.get('description', ''),
                 'thumbnail': info.get('thumbnail'),
                 'webpage_url': info.get('webpage_url', url),
-                'available_qualities': sorted(list(available_qualities), 
+                'available_qualities': sorted(list(available_qualities),
                                             key=lambda x: int(x[:-1]), reverse=True),
                 'formats_count': len(formats),
                 'has_subtitles': bool(info.get('subtitles')),
@@ -268,7 +273,7 @@ def extract_video_info(url: str) -> Dict[str, Any]:
                 'chapters': info.get('chapters', []),
                 'tags': info.get('tags', [])
             }
-            
+
     except Exception as e:
         logger.error(f"Failed to extract video info: {e}")
         raise VideoDownloadError(f"Failed to extract video information: {str(e)}")
@@ -278,7 +283,7 @@ def get_format_selector(options: DownloadOptions) -> str:
     """Generate yt-dlp format selector based on options"""
     if options.custom_format:
         return options.custom_format
-    
+
     if options.download_mode == DownloadMode.AUDIO_ONLY:
         if options.audio_quality == AudioQuality.BEST:
             return "bestaudio/best"
@@ -287,11 +292,11 @@ def get_format_selector(options: DownloadOptions) -> str:
         else:
             abr = options.audio_quality.value
             return f"bestaudio[abr<={abr}]/bestaudio/best"
-    
+
     # Video + Audio format selection
     video_selector = ""
     audio_selector = "bestaudio"
-    
+
     # Configure video quality
     if options.video_quality == VideoQuality.BEST:
         video_selector = "bestvideo"
@@ -300,7 +305,7 @@ def get_format_selector(options: DownloadOptions) -> str:
     else:
         height = options.video_quality.value[:-1]  # Remove 'p'
         video_selector = f"bestvideo[height<={height}]"
-    
+
     # Configure audio quality
     if options.audio_quality != AudioQuality.BEST:
         if options.audio_quality == AudioQuality.WORST:
@@ -308,11 +313,47 @@ def get_format_selector(options: DownloadOptions) -> str:
         else:
             abr = options.audio_quality.value
             audio_selector = f"bestaudio[abr<={abr}]"
-    
+
     # Prefer mp4 container
     format_string = f"{video_selector}[ext=mp4]+{audio_selector}[ext=m4a]/{video_selector}+{audio_selector}/best"
-    
+
     return format_string
+
+
+def build_video_filter(target_w: int, target_h: int, fit_mode: str) -> str:
+    """
+    Build an ffmpeg -vf string for resizing with different fit modes.
+    fit_mode: 'crop', 'pad', 'fit', 'stretch'
+    Returns a filter string to pass to FFmpeg.
+    """
+    # guard
+    if not target_w or not target_h:
+        return ""
+
+    fit_mode = (fit_mode or "crop").lower()
+
+    if fit_mode == "stretch":
+        # simple scale to target (may distort)
+        return f"scale={target_w}:{target_h}"
+
+    if fit_mode == "fit":
+        # scale to fit inside target (no pad), keep aspect ratio (may be smaller)
+        # force_original_aspect_ratio=decrease makes it fit within
+        return f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease"
+
+    if fit_mode == "pad":
+        # scale to fit inside target then pad to exact size (centered)
+        return (
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
+        )
+
+    # default: 'crop' -> scale to fill then crop center to exact dims
+    # force_original_aspect_ratio=increase => scale so video fully covers target, then crop center
+    return (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+        f"crop={target_w}:{target_h}"
+    )
 
 
 def get_download_options_from_request(data: Dict[str, Any]) -> DownloadOptions:
@@ -320,34 +361,60 @@ def get_download_options_from_request(data: Dict[str, Any]) -> DownloadOptions:
     url = data.get("url")
     if not url:
         raise ValidationError("URL is required")
-    
+
     if not validate_youtube_url(url):
         raise ValidationError("Invalid YouTube URL")
-    
+
     # Parse and validate quality options
     try:
         video_quality = VideoQuality(data.get("video_quality", "best").lower())
     except ValueError:
         valid_qualities = [q.value for q in VideoQuality]
         raise ValidationError(f"Invalid video quality. Valid: {valid_qualities}")
-    
+
     try:
         audio_quality = AudioQuality(data.get("audio_quality", "best").lower())
     except ValueError:
         valid_qualities = [q.value for q in AudioQuality]
         raise ValidationError(f"Invalid audio quality. Valid: {valid_qualities}")
-    
+
     try:
         download_mode = DownloadMode(data.get("download_mode", "fast").lower())
     except ValueError:
         valid_modes = [m.value for m in DownloadMode]
         raise ValidationError(f"Invalid download mode. Valid: {valid_modes}")
-    
+
     # Parse subtitle languages
     subtitle_languages = data.get("subtitle_languages", [])
     if isinstance(subtitle_languages, str):
         subtitle_languages = [lang.strip() for lang in subtitle_languages.split(",")]
-    
+
+    # Parse resize options
+    output_width = data.get("output_width")
+    output_height = data.get("output_height")
+    fit_mode = data.get("fit", data.get("fit_mode", None))
+
+    # Ensure ints if provided
+    if output_width is not None:
+        try:
+            output_width = int(output_width)
+            if output_width <= 0:
+                raise ValueError()
+        except Exception:
+            raise ValidationError("output_width must be a positive integer")
+    if output_height is not None:
+        try:
+            output_height = int(output_height)
+            if output_height <= 0:
+                raise ValueError()
+        except Exception:
+            raise ValidationError("output_height must be a positive integer")
+
+    if fit_mode is not None:
+        fit_mode = fit_mode.lower()
+        if fit_mode not in ("crop", "pad", "fit", "stretch"):
+            raise ValidationError("Invalid fit mode. Valid: crop, pad, fit, stretch")
+
     return DownloadOptions(
         url=url,
         start_time=data.get("start"),
@@ -360,7 +427,10 @@ def get_download_options_from_request(data: Dict[str, Any]) -> DownloadOptions:
         subtitle_languages=subtitle_languages,
         thumbnail=data.get("thumbnail", False),
         metadata=data.get("metadata", True),
-        custom_format=data.get("custom_format")
+        custom_format=data.get("custom_format"),
+        output_width=output_width,
+        output_height=output_height,
+        fit_mode=fit_mode
     )
 
 
@@ -370,13 +440,13 @@ def download_video(options: DownloadOptions) -> str:
         # Get video info first
         info = extract_video_info(options.url)
         video_title = sanitize_filename(info['title'])
-        
+
         # Validate clip times if specified
         validate_clip_times(options.start_time, options.end_time, info['duration'])
-        
+
         # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # For audio extraction, don't add extension yet - yt-dlp will handle it
         if options.extract_audio:
             filename = f"{video_title}_{timestamp}"
@@ -384,10 +454,10 @@ def download_video(options: DownloadOptions) -> str:
         else:
             filename = f"{video_title}_{timestamp}.mp4"
             file_path = os.path.join(DOWNLOAD_FOLDER, filename)
-        
+
         # Configure download options
         format_selector = get_format_selector(options)
-        
+
         ydl_opts = {
             'format': format_selector,
             'outtmpl': file_path,
@@ -400,46 +470,46 @@ def download_video(options: DownloadOptions) -> str:
             'embed_subs': False,  # Keep subtitles as separate files
             'keepvideo': False,
         }
-        
+
         # Configure output format
         if not options.extract_audio:
             ydl_opts['merge_output_format'] = 'mp4'
-        
+
         # Configure subtitle languages
         if options.include_subtitles and options.subtitle_languages:
             ydl_opts['subtitleslangs'] = options.subtitle_languages
         elif options.include_subtitles:
             ydl_opts['subtitleslangs'] = ['en']  # Default to English
-        
+
         # Configure post-processors - EXACT LOGIC FROM WORKING VERSION
         postprocessors = []
-        
+
+        # We'll prepare postprocessor_args as a list (ffmpeg args)
+        global_postproc_args = []
+
         # Handle audio extraction and clipping together
         if options.extract_audio:
+            # If clip requested for audio, pass -ss and -t to ffmpeg during postprocessing
             if options.start_time is not None and options.end_time is not None:
-                # For audio clips, do everything in one FFmpeg command
                 clip_duration = options.end_time - options.start_time
                 quality = options.audio_quality.value if options.audio_quality != AudioQuality.BEST else '192'
-                
-                # Single post-processor that clips AND extracts audio
+
                 audio_clip_postprocessor = {
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
                     'preferredquality': quality,
                     'when': 'post_process',
                 }
-                
-                # Add clipping arguments to the audio extraction
-                ydl_opts['postprocessor_args'] = {
-                    'ffmpeg': [
-                        '-ss', str(options.start_time),
-                        '-t', str(clip_duration),
-                        '-avoid_negative_ts', 'make_zero'
-                    ]
-                }
-                
+
+                # Add clipping arguments to the audio extraction (list form)
+                global_postproc_args = [
+                    '-ss', str(options.start_time),
+                    '-t', str(clip_duration),
+                    '-avoid_negative_ts', 'make_zero'
+                ]
+
                 postprocessors.append(audio_clip_postprocessor)
-                
+
                 logger.info(f"Audio clip: extracting {format_duration(clip_duration)} from {format_duration(options.start_time)} to {format_duration(options.end_time)}")
             else:
                 # Just audio extraction, no clipping
@@ -449,13 +519,16 @@ def download_video(options: DownloadOptions) -> str:
                     'preferredquality': options.audio_quality.value if options.audio_quality != AudioQuality.BEST else '192',
                 }
                 postprocessors.append(audio_postprocessor)
-                
+
         else:
             # Video-only clipping (existing logic from working version)
+            ffmpeg_args = []
+
             if options.start_time is not None and options.end_time is not None:
                 clip_duration = options.end_time - options.start_time
-                
+
                 if options.download_mode == DownloadMode.FAST:
+                    # cannot resize in stream-copy; we'll try to keep stream-copy if no resize requested
                     ffmpeg_args = [
                         '-ss', str(options.start_time),
                         '-t', str(clip_duration),
@@ -465,8 +538,7 @@ def download_video(options: DownloadOptions) -> str:
                         '-avoid_negative_ts', 'make_zero',
                         '-fflags', '+genpts'
                     ]
-                    logger.info(f"Fast clipping from {format_duration(options.start_time)} "
-                               f"to {format_duration(options.end_time)} (stream copy mode)")
+                    logger.info(f"Fast clipping from {format_duration(options.start_time)} to {format_duration(options.end_time)} (stream copy mode)")
                 elif options.download_mode == DownloadMode.PRECISE:
                     ffmpeg_args = [
                         '-ss', str(options.start_time),
@@ -478,8 +550,7 @@ def download_video(options: DownloadOptions) -> str:
                         '-b:a', '192k',
                         '-avoid_negative_ts', 'make_zero'
                     ]
-                    logger.info(f"Precise clipping from {format_duration(options.start_time)} "
-                               f"to {format_duration(options.end_time)} (re-encoding mode)")
+                    logger.info(f"Precise clipping from {format_duration(options.start_time)} to {format_duration(options.end_time)} (re-encoding mode)")
                 else:  # BALANCED
                     ffmpeg_args = [
                         '-ss', str(options.start_time),
@@ -490,20 +561,67 @@ def download_video(options: DownloadOptions) -> str:
                         '-c:a', 'copy',
                         '-avoid_negative_ts', 'make_zero'
                     ]
-                    logger.info(f"Balanced clipping from {format_duration(options.start_time)} "
-                               f"to {format_duration(options.end_time)} (fast encode mode)")
-                
+                    logger.info(f"Balanced clipping from {format_duration(options.start_time)} to {format_duration(options.end_time)} (fast encode mode)")
+            else:
+                # No explicit clip times: if resizing requested we still need re-encode
+                if options.output_width and options.output_height:
+                    # default encode args for resize
+                    ffmpeg_args = [
+                        '-c:v', 'libx264',
+                        '-preset', 'veryfast',
+                        '-crf', '25',
+                        '-c:a', 'copy',
+                    ]
+                else:
+                    # no clip, no resize: do nothing special (yt-dlp will download chosen format)
+                    ffmpeg_args = []
+
+            # If resizing requested, we must re-encode — stream copy can't resize.
+            if options.output_width and options.output_height and not options.extract_audio:
+                if options.download_mode == DownloadMode.FAST:
+                    # warn and switch behavior; override ffmpeg_args to an encode-friendly set
+                    logger.info("Resize requested but FAST mode cannot resize — switching to BALANCED (re-encode).")
+                    ffmpeg_args = [
+                        '-ss', str(options.start_time) if options.start_time is not None else '0',
+                        '-t', str(clip_duration) if (options.start_time is not None and options.end_time is not None) else None
+                    ]
+                    # Clean None
+                    ffmpeg_args = [a for a in ffmpeg_args if a is not None]
+                    # add re-encode args
+                    ffmpeg_args += [
+                        '-c:v', 'libx264',
+                        '-preset', 'veryfast',
+                        '-crf', '25',
+                        '-c:a', 'copy',
+                        '-avoid_negative_ts', 'make_zero'
+                    ]
+
+                # Build -vf filter
+                vf = build_video_filter(options.output_width, options.output_height, options.fit_mode or "crop")
+                if vf:
+                    # append video filter to ffmpeg args
+                    ffmpeg_args += ['-vf', vf]
+                    logger.info(f"Applying video filter: {vf}")
+
+            # assign final ffmpeg args to global postproc args if we have something
+            if ffmpeg_args:
+                global_postproc_args = ffmpeg_args
+
+            # Always add video convertor postprocessor if any ffmpeg args exist (or clip was requested)
+            if global_postproc_args:
                 video_postprocessor = {
                     'key': 'FFmpegVideoConvertor',
                     'preferedformat': 'mp4',
                 }
-                
-                ydl_opts['postprocessor_args'] = {'ffmpeg': ffmpeg_args}
                 postprocessors.append(video_postprocessor)
-        
+
         if postprocessors:
             ydl_opts['postprocessors'] = postprocessors
-        
+
+        if global_postproc_args:
+            # yt-dlp expects postprocessor_args as a list (args passed to ffmpeg)
+            ydl_opts['postprocessor_args'] = global_postproc_args
+
         # Download the video with better error handling
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -520,7 +638,7 @@ def download_video(options: DownloadOptions) -> str:
                 raise VideoDownloadError("Video is unavailable in your region or has been removed.")
             else:
                 raise VideoDownloadError(f"Download failed: {str(e)}")
-        
+
         # For audio extraction, find the actual created file (yt-dlp adds .mp3)
         if options.extract_audio:
             # Look for the created audio file
@@ -528,13 +646,13 @@ def download_video(options: DownloadOptions) -> str:
                 if f.startswith(filename) and f.endswith('.mp3'):
                     file_path = os.path.join(DOWNLOAD_FOLDER, f)
                     break
-        
+
         # Verify file was created
         if not os.path.exists(file_path):
             raise VideoDownloadError("Video file was not created")
-        
+
         return file_path
-        
+
     except VideoDownloadError:
         raise
     except Exception as e:
@@ -542,7 +660,7 @@ def download_video(options: DownloadOptions) -> str:
         raise VideoDownloadError(f"Download failed: {str(e)}")
 
 
-# API ROUTES - EXACT SAME AS WORKING VERSION
+# API ROUTES - EXACT SAME AS WORKING VERSION (with updated info fields)
 
 @app.route("/", methods=["GET"])
 def home():
@@ -550,7 +668,7 @@ def home():
     return jsonify({
         "service": "Enhanced YouTube Video Clipper API",
         "version": "2.0.0",
-        "description": "Advanced YouTube video downloader with customizable quality, clipping, and processing options",
+        "description": "Advanced YouTube video downloader with customizable quality, clipping, processing and resizing options",
         "yt_dlp_version": "2025.08.20",
         "endpoints": {
             "/download": "POST - Download video with advanced options",
@@ -570,10 +688,13 @@ def home():
             "subtitle_languages": "Subtitle languages (array/comma-separated, e.g., ['en', 'es'])",
             "thumbnail": "Download thumbnail (boolean, default: false)",
             "metadata": "Include metadata (boolean, default: true)",
-            "custom_format": "Custom yt-dlp format selector (overrides quality settings)"
+            "custom_format": "Custom yt-dlp format selector (overrides quality settings)",
+            "output_width": "Output width in pixels (optional, integer)",
+            "output_height": "Output height in pixels (optional, integer)",
+            "fit": "Fit mode: 'crop', 'pad', 'fit', 'stretch' (optional)"
         },
         "download_modes": {
-            "fast": "Stream copying - fastest but may have sync issues",
+            "fast": "Stream copying - fastest but may have sync issues and cannot resize",
             "balanced": "Fast encode - good balance of speed and quality",
             "precise": "Full re-encode - slowest but most reliable",
             "audio_only": "Audio extraction only"
@@ -595,71 +716,71 @@ def download_video_endpoint():
     is_valid, error_response, status_code = validate_rapidapi_headers()
     if not is_valid:
         return jsonify(error_response), status_code
-    
+
     # Clean up ALL files before each download to prevent storage issues
     force_cleanup_all_files()
-    
+
     try:
         # Parse request data
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
-        
+
         # Parse and validate options
         try:
             options = get_download_options_from_request(data)
         except ValidationError as e:
             return jsonify({"error": str(e)}), 400
-        
+
         # Download video
         file_path = download_video(options)
         filename = os.path.basename(file_path)
-        
+
         # If subtitles were requested, create a ZIP with video + subtitle files
         if options.include_subtitles:
             # Get the base filename (without extension)
             base_name = os.path.splitext(filename)[0]
-            
+
             # Find all subtitle files
             subtitle_files = []
             for f in os.listdir(DOWNLOAD_FOLDER):
                 if f.startswith(base_name) and ('.vtt' in f or '.srt' in f or '.ass' in f):
                     subtitle_files.append(f)
-            
+
             if subtitle_files:
                 # Create ZIP file
                 zip_filename = f"{base_name}_with_subs.zip"
                 zip_path = os.path.join(DOWNLOAD_FOLDER, zip_filename)
-                
+
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                     # Add main video file
                     zipf.write(file_path, filename)
-                    
+
                     # Add subtitle files
                     for sub_file in subtitle_files:
                         sub_path = os.path.join(DOWNLOAD_FOLDER, sub_file)
                         if os.path.exists(sub_path):
                             zipf.write(sub_path, sub_file)
-                
+
                 logger.info(f"Created ZIP with video + {len(subtitle_files)} subtitle files")
-                
+
                 return send_file(
                     zip_path,
                     as_attachment=True,
                     download_name=zip_filename,
                     mimetype='application/zip'
                 )
-        
+
         # If no subtitles requested or no subtitle files found, send just the video/audio
         mime_type = 'audio/mpeg' if options.extract_audio else 'video/mp4'
-        
+
         return send_file(
             file_path,
             as_attachment=True,
             download_name=filename,
             mimetype=mime_type
         )
-        
+
     except VideoDownloadError as e:
         return jsonify({"error": str(e)}), 500
     except Exception as e:
@@ -674,22 +795,22 @@ def get_video_info_endpoint():
     is_valid, error_response, status_code = validate_rapidapi_headers()
     if not is_valid:
         return jsonify(error_response), status_code
-    
+
     try:
         # Parse request data
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
-        
+
         url = data.get("url")
-        
+
         # Validate URL
         if not validate_youtube_url(url):
             return jsonify({"error": "Invalid YouTube URL"}), 400
-        
+
         # Extract video information
         info = extract_video_info(url)
-        
+
         # Format response
         response_data = {
             "title": info['title'],
@@ -709,12 +830,12 @@ def get_video_info_endpoint():
             "chapters": info['chapters'],
             "tags": info['tags'][:10]  # Limit to first 10 tags
         }
-        
+
         return jsonify({
             "status": "success",
             "video_info": response_data
         })
-        
+
     except VideoDownloadError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -729,29 +850,29 @@ def get_video_formats_endpoint():
     is_valid, error_response, status_code = validate_rapidapi_headers()
     if not is_valid:
         return jsonify(error_response), status_code
-    
+
     try:
         # Parse request data
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
-        
+
         url = data.get("url")
-        
+
         # Validate URL
         if not validate_youtube_url(url):
             return jsonify({"error": "Invalid YouTube URL"}), 400
-        
+
         # Get detailed format information
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'listformats': True,
         }
-        
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
+
             formats = []
             for fmt in info.get('formats', []):
                 format_info = {
@@ -771,13 +892,13 @@ def get_video_formats_endpoint():
                     'quality': fmt.get('quality'),
                 }
                 formats.append(format_info)
-        
+
         return jsonify({
             "status": "success",
             "formats": formats,
             "total_formats": len(formats)
         })
-        
+
     except Exception as e:
         logger.error(f"Error getting formats: {e}")
         return jsonify({"error": "Failed to get video formats"}), 500
